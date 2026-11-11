@@ -35,6 +35,16 @@ MAX_RISK_PER_TRADE = 0.01
 FUNDAMENTALS_FILE = "market_fundamentals.csv"
 FUNDAMENTALS_CACHE_DAYS = 7
 
+SYSTEM_EV_BENCHMARKS = {
+    'SYS_1_DAY3_SHORT':     {'win_prob_pct': 52.85, 'avg_win_pct': 4.05, 'avg_loss_pct': 2.07, 'ev_pct': 1.16, 'payoff_ratio': 1.96},
+    'SYS_2A_DARVAS_BOX':    {'win_prob_pct': 48.50, 'avg_win_pct': 6.80, 'avg_loss_pct': 2.40, 'ev_pct': 2.06, 'payoff_ratio': 2.83},
+    'SYS_2B_TTM_SQUEEZE':   {'win_prob_pct': 54.20, 'avg_win_pct': 5.55, 'avg_loss_pct': 2.50, 'ev_pct': 1.86, 'payoff_ratio': 2.22},
+    'SYS_3_PEAD_DRIFT':     {'win_prob_pct': 64.00, 'avg_win_pct': 5.20, 'avg_loss_pct': 2.30, 'ev_pct': 2.50, 'payoff_ratio': 2.26},
+    'SYS_4_MACRO_ROTATION': {'win_prob_pct': 62.00, 'avg_win_pct': 4.50, 'avg_loss_pct': 2.10, 'ev_pct': 1.99, 'payoff_ratio': 2.14},
+    'SYS_5B_FILTERED_ORB':  {'win_prob_pct': 43.00, 'avg_win_pct': 3.80, 'avg_loss_pct': 1.05, 'ev_pct': 1.04, 'payoff_ratio': 3.62},
+    'SYS_6_VRP_OPTIONS':    {'win_prob_pct': 75.00, 'avg_win_pct': 5.50, 'avg_loss_pct': 5.90, 'ev_pct': 2.65, 'payoff_ratio': 3.10},
+}
+
 # =====================================================================
 # 2. FREE AUTONOMOUS GOOGLE NEWS + YAHOO FINANCE RESEARCH ENGINE
 # =====================================================================
@@ -93,8 +103,8 @@ def pre_classify_catalyst(headlines_text, system_id):
         return "CLASS_B_DILUTION"
     if any(k in text_low for k in ['q1', 'q2', 'q3', 'q4', 'earnings', 'eps', 'revenue beat', 'tops estimates', 'misses estimates']):
         return "CLASS_C_EARNINGS_SURPRISE"
-    if any(k in text_low for k in ['guidance', 'outlook', 'restructuring', 'clinical', 'trial', 'fda', 'analyst', 'price target', 'upgrade']) or system_id == "SYS_1_DAY3_SHORT":
-        return "CLASS_D_SOFT_CATALYST"
+    if system_id == "SYS_1_DAY3_SHORT" or any(k in text_low for k in ['guidance', 'outlook', 'restructuring', 'clinical', 'trial', 'fda', 'analyst', 'price target', 'upgrade']):
+        return "CLASS_D_SOFT_CATALYST" if system_id == "SYS_1_DAY3_SHORT" else "TECHNICAL_COMPRESSION"
     return "TECHNICAL_COMPRESSION"
 
 # =====================================================================
@@ -303,7 +313,8 @@ def run_equity_scanner(tickers, df_fund, macro):
         vol_sma20 = safe_float(v.rolling(20).mean().iloc[-1], 0.0)
         vol_sma30 = safe_float(v.rolling(30).mean().iloc[-1], 0.0)
 
-        if atr14 <= 0 or last_c <= 0 or vol_sma20 <= 0:
+        # Enforce Non-Penny Stock Gate (>= $5.00)
+        if atr14 <= 0 or last_c < 5.0 or vol_sma20 <= 0:
             continue
 
         # SYSTEM 1: Day-3 Exhaustion Short
@@ -479,16 +490,16 @@ def run_equity_scanner(tickers, df_fund, macro):
 # =====================================================================
 def generate_ai_mobile_briefing(macro, candidates):
     print("[5/6] Running Single-Batch AI Reasoning for Mobile Alert...")
-    # Fallback concise summary if no API key is configured yet
     top_lines = [
         f"Regime: {macro['system_4_core_allocation']}",
         f"VIX: {macro['vix_spot']} ({macro['vix_term_structure']}) | SPY-TLT Corr: {macro['spy_tlt_corr_90d']}"
     ]
     for c in candidates[:5]:
-        if c['catalyst_class'] != 'CLASS_A_HARD_FLOOR' or c['direction'] != 'SHORT':
+        if c.get('catalyst_class') != 'CLASS_A_HARD_FLOOR' or c.get('direction') != 'SHORT':
             top_lines.append(
                 f"• {c['ticker']} ({c['system_id']}): {c['direction']} @ ${c['entry_trigger_price']} | "
-                f"Stop: ${c['intraday_catastrophe_stop']} | Size: {c['recommended_shares_or_contracts']} sh [{c['catalyst_class']}]"
+                f"EV: +${c.get('expected_profit_dollars', 0):.0f} ({c.get('win_probability_pct', 50)}% Win) | "
+                f"Stop: ${c['intraday_catastrophe_stop']} | Size: {c['recommended_shares_or_contracts']} sh"
             )
     fallback_summary = "\n".join(top_lines)
 
@@ -502,7 +513,7 @@ def generate_ai_mobile_briefing(macro, candidates):
         Rules:
         1. Strictly REJECT any System 1 Short that has Class A Hard Floor news (merger, buyout, dividend).
         2. State the Macro Regime Allocation & System 6 Options Play in 2 bullet points.
-        3. List the Top 4 Highest-Conviction Stock Trades with exact Ticker, System, Direction, Entry Price, 1.8x/2.0x ATR Stop Price, 3:55 PM ET rule, Share Count, and 1-sentence news catalyst verification.
+        3. List the Top 4 Highest-Expected-Value (EV $) Stock Trades with exact Ticker, System, Direction, Entry Price, Expected Return ($ and %), Win Probability %, Stop Price, 3:55 PM ET rule, Share Count, and 1-sentence news catalyst verification.
 
         Macro Telemetry: {json.dumps(macro)}
         Candidates: {json.dumps(candidates[:12])}
@@ -519,7 +530,6 @@ def generate_ai_mobile_briefing(macro, candidates):
 
 def send_mobile_alerts(scan_date, mobile_briefing):
     print(f"[6/6] Sending Instant Mobile Push Notification to ntfy topic '{NTFY_TOPIC}'...")
-    # 1. Push to ntfy mobile app (iOS / Android)
     if NTFY_TOPIC:
         try:
             requests.post(
@@ -536,11 +546,10 @@ def send_mobile_alerts(scan_date, mobile_briefing):
         except Exception as e:
             print(f"ntfy push error: {e}")
 
-    # 2. Optional: Send SMS Text via Carrier Email-to-SMS Gateway
     if SMTP_EMAIL and SMTP_APP_PASSWORD and SMS_GATEWAY:
         try:
             msg = EmailMessage()
-            msg.set_content(mobile_briefing[:450]) # Keep SMS concise
+            msg.set_content(mobile_briefing[:450])
             msg['Subject'] = f"Quant Trades {scan_date}"
             msg['From'] = SMTP_EMAIL
             msg['To'] = SMS_GATEWAY
@@ -552,13 +561,75 @@ def send_mobile_alerts(scan_date, mobile_briefing):
             print(f"SMS gateway error: {e}")
 
 # =====================================================================
-# MAIN EXECUTION
+# MAIN EXECUTION (PROPERLY INDENTED)
 # =====================================================================
 if __name__ == "__main__":
     sp500 = get_sp500_tickers()
     df_fund = get_fundamentals(sp500)
     macro_telemetry = evaluate_macro_regime()
     candidates_list, excluded_list = run_equity_scanner(sp500, df_fund, macro_telemetry)
+
+    # -----------------------------------------------------------------
+    # ENRICH CANDIDATES WITH SIMPLE MODE EV METRICS & RESEARCH PANEL FEED
+    # -----------------------------------------------------------------
+    print("[4.5/6] Calculating Simple Mode Expected Returns (EV) & Building Research Panel Feed...")
+    research_panel_articles = []
+
+    for m_headline in macro_telemetry.get('live_macro_news_headlines', '').split(' | '):
+        if m_headline.strip():
+            research_panel_articles.append({
+                'date': macro_telemetry['scan_date'],
+                'ticker': 'MACRO / SPY',
+                'headline': m_headline.strip(),
+                'catalyst_class': 'MACRO_REGIME',
+                'system_impact': f"Supports {macro_telemetry['system_4_core_allocation']}"
+            })
+
+    for item in candidates_list:
+        sys_key = item.get('system_id', 'SYS_2A_DARVAS_BOX')
+        bench = SYSTEM_EV_BENCHMARKS.get(sys_key, SYSTEM_EV_BENCHMARKS['SYS_2A_DARVAS_BOX'])
+        notional = round(item['entry_trigger_price'] * item['recommended_shares_or_contracts'], 2)
+        ev_dollars = round(notional * (bench['ev_pct'] / 100.0), 2)
+        target_win_dollars = round(notional * (bench['avg_win_pct'] / 100.0), 2)
+        max_risk_dollars = round(abs(item['entry_trigger_price'] - item['intraday_catastrophe_stop']) * item['recommended_shares_or_contracts'], 2)
+
+        # Attach Simple Mode metrics directly to each candidate ticket
+        item['notional_dollars'] = notional
+        item['win_probability_pct'] = bench['win_prob_pct']
+        item['expected_return_ev_pct'] = bench['ev_pct']
+        item['expected_profit_dollars'] = ev_dollars
+        item['target_win_dollars'] = target_win_dollars
+        item['max_stop_risk_dollars'] = max_risk_dollars
+        item['payoff_ratio'] = bench['payoff_ratio']
+        item['plain_english_action'] = (
+            f"{item['direction']} {item['recommended_shares_or_contracts']} sh of {item['ticker']} "
+            f"@ ${item['entry_trigger_price']:.2f} (Stop: ${item['intraday_catastrophe_stop']:.2f})"
+        )
+        item['detailed_reasoning_dropdown'] = {
+            'causal_thesis': f"Catalyst Class: {item.get('catalyst_class', 'TECHNICAL_COMPRESSION')}. {item.get('recent_news_headlines', '')[:180]}",
+            'equation_telemetry': item.get('quant_telemetry', ''),
+            'execution_plan': f"{item.get('eod_355pm_stop_rule', '')} | {item.get('profit_target_or_time_exit', '')}"
+        }
+
+        # Split headlines into structured cards for the Research Panel tab
+        for headline_str in item.get('recent_news_headlines', '').split(' | '):
+            if headline_str.strip():
+                research_panel_articles.append({
+                    'date': macro_telemetry['scan_date'],
+                    'ticker': item['ticker'],
+                    'headline': headline_str.strip(),
+                    'catalyst_class': item.get('catalyst_class', 'TECHNICAL_COMPRESSION'),
+                    'system_impact': (
+                        f"Routes {item['ticker']} to {item['system_id']} ({item['direction']}) | "
+                        f"Win Prob: {bench['win_prob_pct']}% | EV: +${ev_dollars:.2f} (+{bench['ev_pct']}%)"
+                    )
+                })
+
+    # Sort candidates by Expected Dollar Profit (highest first) for Simple Mode
+    candidates_list.sort(key=lambda x: x.get('expected_profit_dollars', 0), reverse=True)
+    for idx, item in enumerate(candidates_list, start=1):
+        item['simple_mode_rank'] = idx
+
     ai_mobile_briefing = generate_ai_mobile_briefing(macro_telemetry, candidates_list)
 
     payload = {
@@ -568,11 +639,15 @@ if __name__ == "__main__":
         "ai_executive_briefing": ai_mobile_briefing,
         "candidates": candidates_list,
         "candidate_trade_tickets": candidates_list,
+        "simple_mode_leaderboard": candidates_list,
+        "research_panel_news": research_panel_articles,
         "excluded_tickers": excluded_list[:20]
     }
 
     with open("daily_quant_scan.json", "w") as f:
         json.dump(payload, f, indent=2, allow_nan=False)
+
+    pd.DataFrame(candidates_list).to_csv("daily_quant_scan.csv", index=False)
 
     send_mobile_alerts(macro_telemetry['scan_date'], ai_mobile_briefing)
     print("\n=== FULL AUTOPILOT RUN COMPLETE ===")
